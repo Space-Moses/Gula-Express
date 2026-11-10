@@ -8,6 +8,7 @@ services:
     name: gula-express
     runtime: node
     plan: free
+    rootDir: gula-express
     buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /api/health
