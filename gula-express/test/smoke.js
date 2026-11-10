@@ -1,0 +1,33 @@
+'use strict';
+// Prueba de humo: recorre el ciclo completo del pedido. Uso: npm test
+const { app, init } = require('../server');
+const assert = require('assert');
+(async () => {
+  await init(); const srv = app.listen(0); const base = `http://localhost:${srv.address().port}/api`;
+  const call = async (m, u, b, t) => { const r = await fetch(base + u, { method: m, headers: { 'Content-Type': 'application/json', ...(t ? { Authorization: 'Bearer ' + t } : {}) }, body: b ? JSON.stringify(b) : undefined }); return { s: r.status, d: await r.json().catch(() => ({})) }; };
+  const login = async e => (await call('POST', '/auth/login', { email: e + '@gula.bo', password: { admin: 'admin123', vendedor: 'vendedor123', cocina: 'cocina123', reparto: 'reparto123' }[e] })).d;
+  await call('PUT', '/admin/settings', { force_open: '1' }, (await login('admin')).token);
+  const m = (await call('GET', '/menu')).d; assert(m.products.length > 5);
+  const ok = (c, msg) => { assert(c, msg); console.log('✔', msg); };
+  let r = await call('POST', '/orders', { mode: 'delivery', zone_id: 1, address: 'Calle Bolívar 123', customer: 'Ana', phone: '70000000', payment: 'efectivo', key: 'k1', items: [{ pid: 1, qty: 2, mods: [4] }, { pid: 6, qty: 1, side: 8, drink: 11 }] });
+  ok(r.s === 200 && r.d.total > 0, 'Pedido en línea creado con total calculado en servidor');
+  const dup = await call('POST', '/orders', { mode: 'delivery', zone_id: 1, address: 'Calle Bolívar 123', customer: 'Ana', phone: '70000000', payment: 'efectivo', key: 'k1', items: [{ pid: 1, qty: 1 }] });
+  ok(dup.d.code === r.d.code, 'RNF-01: reenvío no duplica el pedido');
+  ok((await call('POST', '/orders', { mode: 'recojo', customer: 'A', phone: '700000', payment: 'efectivo', items: [{ pid: 1, qty: 1, mods: [6, 7] }] })).s === 400, 'RF-05: modificadores incompatibles rechazados');
+  ok((await call('POST', '/orders', { mode: 'delivery', zone_id: 99, address: 'xxxxx', customer: 'Ana', phone: '70000000', payment: 'efectivo', items: [{ pid: 1, qty: 1 }] })).s === 400, 'RF-10: zona fuera de cobertura rechazada');
+  const [cook, rep, sel] = [await login('cocina'), await login('reparto'), await login('vendedor')];
+  const id = r.d.id, st = (t, s) => call('PATCH', `/orders/${id}/status`, { status: s }, t.token);
+  ok((await call('GET', '/orders', null, cook.token)).d.length >= 1, 'RF-22: cocina ve la cola');
+  ok(!('phone' in (await call('GET', '/orders', null, cook.token)).d[0]), 'RNF-12: cocina no ve datos personales');
+  ok((await st(sel, 'En preparación')).s === 403, 'RNF-10: el vendedor no puede cocinar');
+  ok((await st(cook, 'En preparación')).s === 200 && (await st(cook, 'Listo')).s === 200, 'RF-25: cocina marca En preparación y Listo');
+  ok((await st(rep, 'En camino')).s === 403, 'Repartidor sin asignación no puede salir');
+  await call('PATCH', `/orders/${id}/assign`, { courier_id: rep.user.id }, sel.token);
+  ok((await st(rep, 'En camino')).s === 200 && (await st(rep, 'Entregado')).s === 200, 'RF-30: repartidor completa la entrega');
+  const t = (await call('GET', '/track/' + r.d.code)).d; ok(t.status === 'Entregado' && t.events.length >= 5, 'RF-16/RNF-02: seguimiento con marcas de tiempo');
+  const c = (await call('POST', '/orders', { mode: 'recojo', customer: 'Luis', phone: '71111111', payment: 'qr', items: [{ pid: 2, qty: 1 }] })).d;
+  ok((await call('POST', `/track/${c.code}/cancel`)).s === 200, 'RF-17: cancelación antes de preparar');
+  ok((await call('POST', '/orders', { channel: 'mostrador', mode: 'mesa', payment: 'efectivo', items: [{ pid: 3, qty: 1 }] }, sel.token)).d.total > 0, 'RF-31: pedido de mostrador');
+  const rep2 = (await call('GET', '/admin/reports/summary', null, (await login('admin')).token)).d; ok(rep2.totals.orders >= 2 && rep2.top.length, 'RF-39..41: reportes');
+  console.log('\nTodas las pruebas pasaron.'); srv.close(); process.exit(0);
+})().catch(e => { console.error('✘', e.message); process.exit(1); });
